@@ -6,7 +6,7 @@ import requests
 import verifiers as vf
 from datasets import Dataset, concatenate_datasets
 from datasets.utils.logging import disable_progress_bar
-from judge_prompts import DIAGNOSIS_JUDGE_PROMPT, TREATMENT_JUDGE_PROMPT
+from prompts import DEFAULT_SYSTEM_PROMPT, DIAGNOSIS_TASK_PROMPT, TREATMENT_TASK_PROMPT, DIAGNOSIS_JUDGE_PROMPT, TREATMENT_JUDGE_PROMPT
 from medarc_verifiers.utils import default_judge_api_key, judge_sampling_args_and_headers
 from openai import AsyncOpenAI
 from verifiers.types import Info, Messages, State
@@ -24,57 +24,6 @@ class Split(str, Enum):
 # Data source URLs
 DIAGNOSIS_DATA_URL = "https://raw.githubusercontent.com/MAGIC-AI4Med/MedRBench/refs/heads/main/data/MedRBench/diagnosis_957_cases_with_rare_disease_491.json"
 TREATMENT_DATA_URL = "https://raw.githubusercontent.com/MAGIC-AI4Med/MedRBench/refs/heads/main/data/MedRBench/treatment_496_cases_with_rare_disease_165.json"
-
-# Original system prompt from MedRBench
-# Source: oracle_diagnose.py and oracle_treatment_planning.py
-DEFAULT_SYSTEM_PROMPT = "You are a professional doctor"
-
-# Task prompts from the original MedRBench repository
-# Source: https://github.com/MAGIC-AI4Med/MedRBench/tree/main/src/Inference/instructions
-
-# Original prompt from oracle_diagnose.txt (typo "Resoning" fixed to "Reasoning")
-DIAGNOSIS_TASK_PROMPT = """\
-Please carefully study the following patient case summary, conduct a comprehensive and in-depth diagnostic analysis, and clearly provide the final diagnosis result.
-
-{case}
-
----
-
-**Format to Follow:**
-
-```
-### Reasoning:
-[Please sort out your thinking process step by step, with each logical step in a separate paragraph.]
-<step 1> Specific thinking content of this step
-<step 2> Specific thinking content of this step
-...
-<step n> Specific thinking content of this step
-
-### Answer:
-[Just output the diagnostic result without any other explanation.]
-```"""
-
-# Original prompt from treatment_plan_prompt.txt
-TREATMENT_TASK_PROMPT = """\
-Please carefully study the following patient case summary, conduct a comprehensive and in-depth treatment planning analysis, and clearly provide the selected treatment for the patient.
-
-{case}
-
----
-
-**Format to Follow:**
-
-```
-### Chain of Thought:
-[Please sort out your thinking process step by step, with each logical step in a separate paragraph, and use a format such as <step 1> to label each step.]
-<step 1> Specific thinking content of this step
-<step 2> Specific thinking content of this step
-...
-<step n> Specific thinking content of this step
-
-### Answer:
-[Just output the selected treatment for the patient without any other explanation.]
-```"""
 
 
 def _fetch_data(url: str) -> dict[str, Any]:
