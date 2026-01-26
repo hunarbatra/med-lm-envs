@@ -1,13 +1,21 @@
+import json
+import os
 import re
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
-import requests
 import verifiers as vf
 from datasets import Dataset, concatenate_datasets
 from datasets.utils.logging import disable_progress_bar
-from prompts import DEFAULT_SYSTEM_PROMPT, DIAGNOSIS_TASK_PROMPT, TREATMENT_TASK_PROMPT, DIAGNOSIS_JUDGE_PROMPT, TREATMENT_JUDGE_PROMPT
-from medarc_verifiers.utils import default_judge_api_key, judge_sampling_args_and_headers
+from prompts import (
+    DEFAULT_SYSTEM_PROMPT,
+    DIAGNOSIS_TASK_PROMPT,
+    TREATMENT_TASK_PROMPT,
+    DIAGNOSIS_JUDGE_PROMPT,
+    TREATMENT_JUDGE_PROMPT,
+)
+from medarc_verifiers.utils import default_judge_api_key, download_file, judge_sampling_args_and_headers
 from openai import AsyncOpenAI
 from verifiers.types import Info, Messages, State
 
@@ -21,16 +29,30 @@ class Split(str, Enum):
     TREATMENT = "treatment"
     ALL = "all"
 
-# Data source URLs
-DIAGNOSIS_DATA_URL = "https://raw.githubusercontent.com/MAGIC-AI4Med/MedRBench/refs/heads/main/data/MedRBench/diagnosis_957_cases_with_rare_disease_491.json"
-TREATMENT_DATA_URL = "https://raw.githubusercontent.com/MAGIC-AI4Med/MedRBench/refs/heads/main/data/MedRBench/treatment_496_cases_with_rare_disease_165.json"
+
+# Data source
+BASE_URL = "https://raw.githubusercontent.com/MAGIC-AI4Med/MedRBench/refs/heads/main/data/MedRBench"
+DIAGNOSIS_FILENAME = "diagnosis_957_cases_with_rare_disease_491.json"
+TREATMENT_FILENAME = "treatment_496_cases_with_rare_disease_165.json"
 
 
-def _fetch_data(url: str) -> dict[str, Any]:
-    """Fetch JSON data from URL."""
-    response = requests.get(url, timeout=60)
-    response.raise_for_status()
-    return response.json()
+def _resolve_cache_dir(cache_dir: Path | str | None) -> Path:
+    """Resolve the cache directory path."""
+    if cache_dir is None:
+        env_override = os.getenv("MEDRBENCH_CACHE_DIR")
+        if env_override:
+            return Path(env_override)
+        return Path.home() / ".cache" / "medrbench"
+    return Path(cache_dir)
+
+
+def _fetch_data(filename: str, cache_path: Path) -> dict[str, Any]:
+    """Fetch JSON data from URL with caching."""
+    json_path = cache_path / filename
+    download_file(url=f"{BASE_URL}/{filename}", dest=json_path, verify=False)
+
+    with open(json_path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _to_vf_format_diagnosis(data: dict[str, Any], rare_disease_only: bool = False) -> Dataset:
@@ -73,7 +95,7 @@ def _to_vf_format_treatment(data: dict[str, Any], rare_disease_only: bool = Fals
     """Convert treatment data to verifiers format."""
     records = []
     for pmc_id, case in data.items():
-        # Filter for rare disease cases 
+        # Filter for rare disease cases
         if rare_disease_only and not case.get("checked_rare_disease"):
             continue
 
@@ -117,11 +139,11 @@ def _extract_completion_text(completion: Messages) -> str:
 
 def _extract_answer_from_response(response: str) -> str:
     """Extract the answer from model response using the ### Answer: format.
-    
+
     The original MedRBench prompts ask for responses in the format:
     ### Answer:
     [answer content]
-    
+
     This function extracts the content after "### Answer:".
     """
     # Try to find the answer section
@@ -130,7 +152,7 @@ def _extract_answer_from_response(response: str) -> str:
         r"\*\*Answer:\*\*\s*\n?(.*)",  # **Answer:** markdown bold
         r"Answer:\s*\n?(.*)",  # Plain Answer:
     ]
-    
+
     for pattern in answer_patterns:
         match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
         if match:
@@ -138,7 +160,7 @@ def _extract_answer_from_response(response: str) -> str:
             # Remove trailing markdown code block delimiters if present
             answer = re.sub(r"```\s*$", "", answer).strip()
             return answer
-    
+
     # If no answer section found, return the full response (judge will handle it)
     return response.strip()
 
@@ -154,8 +176,8 @@ def _parse_judge_result(judge_response: str) -> bool:
 def load_environment(
     split: str | Split = Split.ALL,
     rare_disease_only: bool = False,
-    eval_full: bool = False,
-    judge_model: str = "gpt-4o",
+    cache_dir: Path | str | None = None,
+    judge_model: str = "gpt-5-mini",
     judge_base_url: str | None = None,
     judge_api_key: str | None = None,
     system_prompt: str | None = None,
@@ -169,17 +191,11 @@ def load_environment(
     - Uses original task prompts that specify "### Answer:" format
     - Uses original judge prompts from MedRBench
 
-    Dataset is split 80/20 into train/eval by default.
-    - Diagnosis: 765 train / 192 eval (957 total)
-    - Treatment: 396 train / 100 eval (496 total)
-    - All: 1161 train / 292 eval (1453 total)
-
-    Set eval_full=True to evaluate on all samples (no train split).
-
     Args:
         split: Dataset split - "diagnosis", "treatment", or "all" (default: "all")
         rare_disease_only: If True, only include cases with rare diseases
-        eval_full: If True, use all data for eval (no train split). Default False.
+        cache_dir: Directory for caching downloaded data (defaults to ~/.cache/medrbench
+            or MEDRBENCH_CACHE_DIR env var)
         judge_model: Model to use for LLM-as-judge evaluation (default: gpt-4o as in original)
         judge_base_url: Custom API base URL for judge model
         judge_api_key: API key for judge model
@@ -189,21 +205,25 @@ def load_environment(
     Returns:
         A verifiers Environment configured for MedRBench evaluation
     """
+    # Setup cache directory
+    cache_path = _resolve_cache_dir(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
     # Normalize split to enum
     split = Split(split) if isinstance(split, str) else split
 
     # Load and convert data based on split
     if split == Split.DIAGNOSIS:
-        data = _fetch_data(DIAGNOSIS_DATA_URL)
+        data = _fetch_data(DIAGNOSIS_FILENAME, cache_path)
         dataset = _to_vf_format_diagnosis(data, rare_disease_only=rare_disease_only)
     elif split == Split.TREATMENT:
-        data = _fetch_data(TREATMENT_DATA_URL)
+        data = _fetch_data(TREATMENT_FILENAME, cache_path)
         dataset = _to_vf_format_treatment(data, rare_disease_only=rare_disease_only)
     elif split == Split.ALL:
         # Load both diagnosis and treatment datasets and combine
-        diag_data = _fetch_data(DIAGNOSIS_DATA_URL)
+        diag_data = _fetch_data(DIAGNOSIS_FILENAME, cache_path)
         diag_dataset = _to_vf_format_diagnosis(diag_data, rare_disease_only=rare_disease_only)
-        treat_data = _fetch_data(TREATMENT_DATA_URL)
+        treat_data = _fetch_data(TREATMENT_FILENAME, cache_path)
         treat_dataset = _to_vf_format_treatment(treat_data, rare_disease_only=rare_disease_only)
         dataset = concatenate_datasets([diag_dataset, treat_dataset])
     else:
@@ -236,16 +256,16 @@ def load_environment(
     async def judge_rubric_reward(completion: Messages, info: Info, state: State, **kwargs: Any) -> float:
         """Evaluate model completion using LLM judge with original MedRBench prompts."""
         gold_response = str(info.get("reference_response") or "")
-        
+
         # Extract completion text from messages
         completion_text = _extract_completion_text(completion)
-        
+
         # Extract the answer from "### Answer:" format (as per original MedRBench prompts)
         extracted_answer = _extract_answer_from_response(completion_text)
 
         # Determine task type from info (supports "all" split with mixed tasks)
         task_type = info.get("task", "medrbench-diagnosis")
-        
+
         if task_type == "medrbench-diagnosis":
             # Use original MedRBench diagnosis judge prompt
             judge_prompt = DIAGNOSIS_JUDGE_PROMPT.format(
@@ -281,23 +301,10 @@ def load_environment(
 
     judge_rubric.add_reward_func(judge_rubric_reward, weight=1.0)
 
-    # Determine train/eval split
-    if eval_full:
-        # Use all data for evaluation (no train split)
-        train_ds = None
-        eval_ds = dataset
-    else:
-        # Default: 80/20 train/eval split (consistent with medqa, med_mcqa, pubmedqa)
-        split_dataset = dataset.train_test_split(test_size=0.2, seed=42)
-        train_ds = split_dataset["train"]
-        eval_ds = split_dataset["test"]
-
     return vf.SingleTurnEnv(
-        dataset=train_ds,
-        eval_dataset=eval_ds,
+        eval_dataset=dataset,
         system_prompt=system_prompt,
         rubric=judge_rubric,
         parser=parser,
         **kwargs,
     )
-
