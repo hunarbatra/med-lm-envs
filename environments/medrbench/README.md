@@ -3,7 +3,7 @@
 ### Overview
 - **Environment ID**: `medrbench`
 - **Short description**: Medical reasoning benchmark for diagnosis and treatment planning on rare disease cases.
-- **Tags**: medical, diagnosis, treatment, rare-disease, llm-judge, single-turn, eval
+- **Tags**: medical, diagnosis, treatment, rare-disease, llm-judge, single-turn, multi-turn, eval
 
 ### Datasets
 - **Primary dataset**: MedRBench
@@ -16,9 +16,9 @@
 | treatment | 496 | 165 |
 
 ### Task
-- **Type**: single-turn
+- **Type**: diagnosis supports `oracle`, `1turn`, and `free_turn`; treatment is `oracle` only
 - **System Prompt**: `"You are a professional doctor"` (matching original)
-- **Parser**: Custom parser extracting from `### Answer:` format (matching original prompts)
+- **Parser**: Oracle/treatment use `### Answer:`; `1turn`/`free_turn` diagnosis use `### Conclusion:`
 - **Rubric overview**: JudgeRubric (LLM-as-a-Judge evaluation using original MedRBench prompts)
 - **Evaluation metric**: Binary accuracy (Correct/Wrong)
 
@@ -67,6 +67,18 @@ uv run vf-eval medrbench \
     -m o3-mini \
     -n -1 \
     -a '{"split": "diagnosis", "rare_disease_only": true, "judge_model": "gpt-4o"}'
+
+# 1-turn diagnosis mode
+uv run vf-eval medrbench \
+    -m gpt-4o \
+    -n 50 \
+    -a '{"split": "diagnosis", "task_mode": "1turn", "judge_model": "gpt-4o"}'
+
+# Free-turn diagnosis mode (max 5 turns)
+uv run vf-eval medrbench \
+    -m gpt-4o \
+    -n 50 \
+    -a '{"split": "diagnosis", "task_mode": "free_turn", "max_turns": 5, "judge_model": "gpt-4o"}'
 ```
 
 ### Environment Arguments
@@ -75,42 +87,31 @@ uv run vf-eval medrbench \
 |-----|------|---------|-------------|
 | `split` | str | `all` | Dataset split: `diagnosis`, `treatment`, or `all` (default) |
 | `rare_disease_only` | bool | `False` | If True, only include cases with rare diseases |
-| `eval_full` | bool | `False` | If True, use all data for eval (no train split). If False (default), use 80/20 train/eval split. |
-| `judge_model` | str | `gpt-4o` | Model identifier for the LLM judge (original uses `gpt-4o-2024-11-20`) |
+| `task_mode` | str | `oracle` | Diagnosis mode: `oracle`, `1turn`, or `free_turn` (diagnosis only) |
+| `max_turns` | int | `5` | Max turns for `free_turn` diagnosis |
+| `judge_model` | str | `gpt-5-mini` | Model identifier for the LLM judge (original uses `gpt-4o-2024-11-20`) |
 | `judge_base_url` | str | `None` | Custom API base URL for judge model |
 | `judge_api_key` | str | `None` | API key for judge model. Falls back to `JUDGE_API_KEY` or `OPENAI_API_KEY` environment variables |
+| `patient_agent_model` | str | `gpt-4o` | Model identifier for the patient agent in multi-turn modes |
+| `patient_agent_base_url` | str | `None` | Custom API base URL for the patient agent |
+| `patient_agent_api_key` | str | `None` | API key for the patient agent (defaults to judge credentials) |
 | `system_prompt` | str | `"You are a professional doctor"` | System prompt (matches original MedRBench) |
 
-### Train/Eval Splits
+### Dataset Size Notes
 
-By default, dataset is split 80/20 into train/eval:
-
-| Split | Total | Train (80%) | Eval (20%) |
-|-------|-------|-------------|------------|
-| `all` (default) | 1453 | 1162 | 291 |
-| `diagnosis` | 957 | 765 | 192 |
-| `treatment` | 496 | 396 | 100 |
-
-Set `eval_full=True` to evaluate on all samples (no train split):
-```bash
-# Evaluate on all samples (diagnosis + treatment combined)
-vf-eval medrbench -m o3-mini -a '{"eval_full": true}'
-
-# Evaluate on all 957 diagnosis samples only
-vf-eval medrbench -m o3-mini -a '{"split": "diagnosis", "eval_full": true}'
-
-# Evaluate on all 496 treatment samples only
-vf-eval medrbench -m o3-mini -a '{"split": "treatment", "eval_full": true}'
-```
+This environment evaluates against the full dataset for the selected `split`. Use `-n` in `vf-eval` to subsample.
 
 ### Notes
 
 - The `question` field contains the formatted clinical case with task instructions
 - The `answer` field contains the ground truth diagnosis or treatment plan (also available as `reference_response` in `info`)
 - Judge prompts are taken directly from MedRBench's original evaluation prompts (`acc_diagnose.txt` and `acc_treatment_plan.txt`)
+- Treatment web-search evidence from the original implementation is not used; the judge prompt’s `[Additional Information]` section is left empty.
 - Reward is binary: 1.0 for correct, 0.0 for incorrect (following original logic: `'correct' in evaluation_result.lower()`)
+- Treatment remains oracle-only; `task_mode` applies to diagnosis split only
 - Case metadata (body_category, disorder_category, checked_rare_disease) is available in `info` for analysis
 - Data is loaded directly from the MedRBench GitHub repository
+- Additional information web search removed from treatment judge prompt
 
 ### Dataset Examples
 
@@ -154,3 +155,4 @@ JAK2 inhibitor therapy (ruxolitinib)
 ### Authors
 This environment has been put together by:
 - [Hunar Batra](https://github.com/hunarbatra)
+- [Benjamin Warner](https://github.com/warner-benjamin)
